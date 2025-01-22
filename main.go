@@ -3,11 +3,12 @@ package main
 import (
 	pb "PriceGuardian/gigachat"
 	"PriceGuardian/ozon"
+	"PriceGuardian/params"
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"github.com/joho/godotenv"
+	uuid "github.com/nu7hatch/gouuid"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -16,8 +17,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -42,14 +43,11 @@ func NewChatClient(token string) *ChatClient {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-
 	// Создаем контекст с тайм-аутом
 	ctx := context.Background()
-
 	// Добавляем токен аутентификации в метаданные
 	md := metadata.Pairs("Authorization", "Bearer "+token)
 	ctx = metadata.NewOutgoingContext(ctx, md)
-
 	return &ChatClient{
 		client: pb.NewChatServiceClient(conn),
 		ctx:    ctx,
@@ -57,43 +55,41 @@ func NewChatClient(token string) *ChatClient {
 }
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("No .env file found")
-	}
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	args := params.LoadParams()
 	// Устанавливаем соединение с gRPC сервером
-	chat := NewChatClient(getAccessToken())
-	api := ozon.NewApi()
+	chat := NewChatClient(getAccessToken(args))
+	api := ozon.NewApi(args)
 	next := true
-	maxDiff, err := time.ParseDuration("24h")
+	maxDiff, err := time.ParseDuration(args[params.TIME_DEPTH])
 	if err != nil {
 		log.Fatal(err)
 	}
 	start := time.Now()
 	end := start
 	for next && start.Sub(end) <= maxDiff {
-		res := ozon.GetChunk(api)
+		res := api.GetChunk()
 		for i, rev := range res.Result {
-			fullReview := rev.Text.Negative + rev.Text.Positive + rev.Text.Comment
-			negative := isNegativeResponse(chat, fullReview)
-			fmt.Printf("%v\n", rev)
-			fmt.Printf("%d, отзыв: %v\nнегативный:%t\n----\n", i+1, rev, negative)
+			fullReview := strings.Join([]string{rev.Text.Negative, rev.Text.Positive, rev.Text.Comment}, " ")
+			negative := isNegativeResponse(chat, fullReview, args)
+			log.Printf("%d\nотзыв: %v\nнегативный: %t\n", i+1, rev, negative)
+			if negative {
+				log.Println("process...")
+			}
 		}
 		next = res.HasNext
 		tt, _ := strconv.ParseInt(res.PaginationLastTimestamp, 10, 64)
 		end = time.UnixMicro(tt)
-		fmt.Printf("%v, %v\n", end, start.Sub(end))
 	}
 }
 
-func isNegativeResponse(chat *ChatClient, userResponse string) bool {
-	//TODO do not stop program if one checking fails
+func isNegativeResponse(chat *ChatClient, userResponse string, args params.Params) bool {
 	request := &pb.ChatRequest{
 		Model: "GigaChat",
 		Messages: []*pb.Message{
 			{
-				Role: "system",
-				Content: `Классифицируй обращения пользователя в подходящую категорию.
-				Категории: положительный_отзыв, отрицательный_отзыв. В ответе укажи только категорию.`,
+				Role:    "system",
+				Content: args[params.PROMPT],
 			},
 			{
 				Role:    "user",
@@ -103,15 +99,15 @@ func isNegativeResponse(chat *ChatClient, userResponse string) bool {
 	}
 	response, err := chat.client.Chat(chat.ctx, request)
 	if err != nil {
-		log.Fatalf("Ошибка при вызове метода Chat: %v", err)
+		log.Printf("Ошибка при вызове метода Chat: %v", err)
+		return false
 	}
-
 	if len(response.Alternatives) < 1 {
-		log.Fatalf("не получен ответ от модели")
+		log.Printf("не получен ответ от модели")
+		return false
 	}
 	class := response.Alternatives[0].Message.Content
-	log.Printf("Ответ от модели: %s", class)
-	return class == "отрицательный_отзыв"
+	return class == "отрицательный"
 }
 
 type AuthResponse struct {
@@ -119,30 +115,23 @@ type AuthResponse struct {
 	ExpiresAt   int64  `json:"expires_at"`   // Время истечения токена в миллисекундах
 }
 
-func getAccessToken() string {
+func getAccessToken(args params.Params) string {
 	// URL для запроса
 	apiURL := "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-
 	// Создаем данные для запроса
 	data := url.Values{}
 	data.Set("scope", "GIGACHAT_API_PERS")
-
 	// Создаем новый HTTP-запрос
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBufferString(data.Encode()))
 	if err != nil {
 		log.Fatalf("Ошибка при создании запроса: %v", err)
 	}
-
 	// Устанавливаем заголовки
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("RqUID", "d04d593f-f9f2-4a28-a742-17653bf96d0e")
-	gigachatAuthData, exists := os.LookupEnv("GIGACHAT_AUTH_DATA")
-	if !exists {
-		log.Fatal("задайте GIGACHAT_AUTH_DATA")
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Basic %s", gigachatAuthData))
-
+	id, _ := uuid.NewV4()
+	req.Header.Set("RqUID", id.String())
+	req.Header.Set("Authorization", fmt.Sprintf("Basic %s", args[params.GIGACHAT_AUTH_DATA]))
 	// Отправляем запрос
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -153,15 +142,13 @@ func getAccessToken() string {
 		log.Fatalf("Ошибка при отправке запроса: %v", err)
 	}
 	defer resp.Body.Close()
-
 	// Проверяем статус-код ответа
 	if resp.StatusCode != http.StatusOK {
 		log.Fatalf("Ошибка: статус-код %d %v", resp.StatusCode, err)
 	}
-
 	var authResponse AuthResponse
 	if err := json.NewDecoder(resp.Body).Decode(&authResponse); err != nil {
 		log.Fatalf("Ошибка декодирования %v", err)
 	}
-	return authResponse.AccessToken
+	return authResponse.AccessToken // TODO add logic to refresh token
 }
