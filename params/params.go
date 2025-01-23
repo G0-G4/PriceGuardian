@@ -14,6 +14,8 @@ const (
 	COMPANY_ID         ParamName = "COMPANY_ID"
 	TIME_DEPTH         ParamName = "TIME_DEPTH"
 	PROMPT             ParamName = "PROMPT"
+	API_KEY            ParamName = "API_KEY"
+	CLIENT_ID          ParamName = "CLIENT_ID"
 )
 
 type Params map[ParamName]string
@@ -29,6 +31,8 @@ func LoadParams() Params {
 		COMPANY_ID,
 		TIME_DEPTH,
 		PROMPT,
+		API_KEY,
+		CLIENT_ID,
 	}
 	for _, paramName := range paramNames {
 		value, exists := os.LookupEnv(string(paramName))

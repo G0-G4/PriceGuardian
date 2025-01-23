@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -68,7 +69,7 @@ func main() {
 	start := time.Now()
 	end := start
 	for next && start.Sub(end) <= maxDiff {
-		res := api.GetChunk()
+		res := api.GetNextChunk()
 		for i, rev := range res.Result {
 			fullReview := strings.Join([]string{rev.Text.Negative, rev.Text.Positive, rev.Text.Comment}, " ")
 			negative := isNegativeResponse(chat, fullReview, args)
@@ -81,6 +82,28 @@ func main() {
 		tt, _ := strconv.ParseInt(res.PaginationLastTimestamp, 10, 64)
 		end = time.UnixMicro(tt)
 	}
+	rev := loadNewReviews(api)
+	for _, r := range rev {
+		log.Println(r)
+	}
+	log.Println("-----------------------------")
+	rev = loadNewReviews(api)
+	for _, r := range rev {
+		log.Println(r)
+	}
+}
+
+func loadNewReviews(api *ozon.Api) []*ozon.Review {
+	start, err := os.ReadFile("start.txt")
+	if err != nil {
+		log.Fatalf("failed to read start time from file")
+	}
+	t, _ := time.Parse(time.RFC3339Nano, string(start))
+	reviews, nextStart := api.GetReviewsTillTime(t)
+	if err := os.WriteFile("start.txt", []byte(nextStart.Format(time.RFC3339Nano)), 0644); err != nil {
+		log.Fatal("failed to save next start time in file")
+	}
+	return reviews
 }
 
 func isNegativeResponse(chat *ChatClient, userResponse string, args params.Params) bool {

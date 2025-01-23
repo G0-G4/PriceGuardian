@@ -4,18 +4,25 @@ import (
 	"PriceGuardian/params"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"strings"
+	"time"
 )
 
 type ReviewText struct {
 	Positive string `json:"positive"`
 	Negative string `json:"negative"`
 	Comment  string `json:"comment"`
+}
+
+func (text ReviewText) String() string {
+	return strings.Join([]string{text.Positive, text.Negative, text.Comment}, " ")
 }
 
 type Product struct {
@@ -40,6 +47,10 @@ type Review struct {
 	UUID              string     `json:"uuid"`
 	OrderDeliveryType string     `json:"orderDeliveryType"`
 	IsPinned          bool       `json:"is_pinned"`
+}
+
+func (review Review) String() string {
+	return fmt.Sprintf("{%s %s %v %s}", review.ID, review.SKU, review.Text, review.PublishedAt)
 }
 
 type ReviewsList struct {
@@ -89,7 +100,7 @@ func NewApi(args params.Params) *Api {
 			WithCounters:            false,
 			Sort:                    map[string]string{"sort_by": "PUBLISHED_AT", "sort_direction": "DESC"},
 			CompanyType:             "seller",
-			Filter:                  map[string]interface{}{"interaction_status": []string{"NOT_VIEWED", "VIEWED"}},
+			Filter:                  map[string]interface{}{"interaction_status": []string{"NOT_VIEWED"}},
 			CompanyId:               args[params.COMPANY_ID],
 			PaginationLastTimestamp: nil,
 			PaginationLastUuid:      nil,
@@ -138,7 +149,35 @@ func (api *Api) loadCookies() {
 	api.session.Jar.SetCookies(base, cookies)
 }
 
-func (api *Api) GetChunk() ReviewsList {
+func (api *Api) GetReviewsTillTime(startTime time.Time) ([]*Review, time.Time) {
+	reviews := make([]*Review, 0, 100)
+	next := true
+	var nextStart *time.Time = nil
+	brk := true
+	for next && brk {
+		res := api.GetNextChunk()
+		for _, rev := range res.Result {
+			t, _ := time.Parse(time.RFC3339Nano, rev.PublishedAt)
+			if nextStart == nil && t.After(startTime) {
+				nextStart = &t
+			}
+			if t.Before(startTime) || t.Equal(startTime) {
+				brk = false
+				break
+			}
+			reviews = append(reviews, &rev)
+		}
+		next = res.HasNext
+	}
+	api.loadMoreParams.PaginationLastUuid = nil
+	api.loadMoreParams.PaginationLastTimestamp = nil
+	if nextStart == nil {
+		return reviews, startTime
+	}
+	return reviews, *nextStart
+}
+
+func (api *Api) GetNextChunk() ReviewsList {
 	loadMoreParams, err := json.Marshal(api.loadMoreParams)
 	if err != nil {
 		log.Fatalf("не удалось подготовить параметры для загрузки товаров %v", err)
@@ -166,9 +205,16 @@ func (api *Api) GetChunk() ReviewsList {
 	}
 	var res ReviewsList
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		log.Fatalf("Ошибка декодирования %v", err)
+		log.Printf("Ошибка декодирования %v", err)
 	}
 	api.loadMoreParams.PaginationLastUuid = &res.PaginationLastUUID
 	api.loadMoreParams.PaginationLastTimestamp = &res.PaginationLastTimestamp
 	return res
 }
+
+//func (api *Api) ChangePrice(review Review) {
+//	req, err := http.NewRequest("POST", "https://api-seller.ozon.ru/v1/product/import/prices", nil)
+//	if err != nil {
+//		log.Fatalf("Ошибка при подготовке запроса %v", err)
+//	}
+//}
