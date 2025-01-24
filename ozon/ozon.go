@@ -212,9 +212,67 @@ func (api *Api) GetNextChunk() ReviewsList {
 	return res
 }
 
-//func (api *Api) ChangePrice(review Review) {
-//	req, err := http.NewRequest("POST", "https://api-seller.ozon.ru/v1/product/import/prices", nil)
-//	if err != nil {
-//		log.Fatalf("Ошибка при подготовке запроса %v", err)
-//	}
-//}
+func (api *Api) ChangePrice(review Review, newPrice string) error {
+	// 1. Подготовка данных для изменения цены
+	type PriceUpdateRequest struct {
+		Prices []struct {
+			OfferID string `json:"offer_id"`
+			Price   string `json:"price"`
+		} `json:"prices"`
+	}
+
+	updateData := PriceUpdateRequest{
+		Prices: []struct {
+			OfferID string `json:"offer_id"`
+			Price   string `json:"price"`
+		}{
+			{
+				OfferID: review.Product.OfferID,
+				Price:   newPrice,
+			},
+		},
+	}
+
+	// 2. Преобразование в JSON
+	jsonData, err := json.Marshal(updateData)
+	if err != nil {
+		return fmt.Errorf("ошибка сериализации данных: %v", err)
+	}
+
+	// 3. Создание HTTP-запроса
+	req, err := http.NewRequest(
+		"POST",
+		"https://api-seller.ozon.ru/v1/product/import/prices",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return fmt.Errorf("ошибка создания запроса: %v", err)
+	}
+
+	// 4. Установка заголовков
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Client-Id", api.arguments[params.CLIENT_ID]) // Добавьте CLIENT_ID в params
+	req.Header.Set("Api-Key", api.arguments[params.API_KEY])     // Добавьте API_KEY в params
+
+	// 5. Отправка запроса
+	resp, err := api.session.Do(req)
+	if err != nil {
+		return fmt.Errorf("ошибка отправки запроса: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 6. Проверка статуса ответа
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ошибка API: %d %s", resp.StatusCode, string(body))
+	}
+
+	// 7. Декодирование ответа для проверки
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("ошибка декодирования ответа: %v", err)
+	}
+
+	log.Printf("Цена успешно обновлена для товара %s", review.Product.OfferID)
+	return nil
+}
