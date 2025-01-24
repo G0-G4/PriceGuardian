@@ -212,34 +212,48 @@ func (api *Api) GetNextChunk() ReviewsList {
 	return res
 }
 
-func (api *Api) ChangePrice(review Review, newPrice string) error {
-	// 1. Подготовка данных для изменения цены
+func (api *Api) ChangePrice(offerIDs []string, newPrices []string) error {
+	// 1. Валидация входных данных
+	if len(offerIDs) == 0 || len(newPrices) == 0 {
+		return fmt.Errorf("списки offerIDs и newPrices не могут быть пустыми")
+	}
+
+	if len(offerIDs) != len(newPrices) {
+		return fmt.Errorf("количество offerIDs (%d) не совпадает с количеством newPrices (%d)",
+			len(offerIDs), len(newPrices))
+	}
+
+	// 2. Подготовка структуры запроса
+	type PriceItem struct {
+		OfferID string `json:"offer_id"`
+		Price   string `json:"price"`
+	}
+
 	type PriceUpdateRequest struct {
-		Prices []struct {
-			OfferID string `json:"offer_id"`
-			Price   string `json:"price"`
-		} `json:"prices"`
+		Prices []PriceItem `json:"prices"`
 	}
 
-	updateData := PriceUpdateRequest{
-		Prices: []struct {
-			OfferID string `json:"offer_id"`
-			Price   string `json:"price"`
-		}{
-			{
-				OfferID: review.Product.OfferID,
-				Price:   newPrice,
-			},
-		},
+	var priceItems []PriceItem
+	for i := range offerIDs {
+		// Проверка формата цены
+		if !strings.Contains(newPrices[i], ".") {
+			return fmt.Errorf("неверный формат цены для offer_id %s: %s. Пример: 999.99",
+				offerIDs[i], newPrices[i])
+		}
+
+		priceItems = append(priceItems, PriceItem{
+			OfferID: offerIDs[i],
+			Price:   newPrices[i],
+		})
 	}
 
-	// 2. Преобразование в JSON
-	jsonData, err := json.Marshal(updateData)
+	// 3. Формирование JSON
+	jsonData, err := json.Marshal(PriceUpdateRequest{Prices: priceItems})
 	if err != nil {
 		return fmt.Errorf("ошибка сериализации данных: %v", err)
 	}
 
-	// 3. Создание HTTP-запроса
+	// 4. Создание и настройка запроса
 	req, err := http.NewRequest(
 		"POST",
 		"https://api-seller.ozon.ru/v1/product/import/prices",
@@ -249,30 +263,30 @@ func (api *Api) ChangePrice(review Review, newPrice string) error {
 		return fmt.Errorf("ошибка создания запроса: %v", err)
 	}
 
-	// 4. Установка заголовков
+	// 5. Установка заголовков
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Client-Id", api.arguments[params.CLIENT_ID]) // Добавьте CLIENT_ID в params
-	req.Header.Set("Api-Key", api.arguments[params.API_KEY])     // Добавьте API_KEY в params
+	req.Header.Set("Client-Id", api.arguments[params.CLIENT_ID])
+	req.Header.Set("Api-Key", api.arguments[params.API_KEY])
 
-	// 5. Отправка запроса
+	// 6. Отправка запроса
 	resp, err := api.session.Do(req)
 	if err != nil {
 		return fmt.Errorf("ошибка отправки запроса: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// 6. Проверка статуса ответа
+	// 7. Обработка ответа
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ошибка API: %d %s", resp.StatusCode, string(body))
+		return fmt.Errorf("API error: %d %s", resp.StatusCode, string(body))
 	}
 
-	// 7. Декодирование ответа для проверки
+	// 8. Декодирование ответа
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("ошибка декодирования ответа: %v", err)
 	}
 
-	log.Printf("Цена успешно обновлена для товара %s", review.Product.OfferID)
+	log.Printf("Успешно обновлено %d цен", len(offerIDs))
 	return nil
 }
