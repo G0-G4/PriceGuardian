@@ -56,7 +56,7 @@ func (review Review) String() string {
 type ReviewsList struct {
 	Result                  []Review `json:"result"`
 	HasNext                 bool     `json:"hasNext"`
-	PaginationLastTimestamp string   `json:"pagination_last_timestamp"` // Изменено на string
+	PaginationLastTimestamp string   `json:"pagination_last_timestamp"`
 	PaginationLastUUID      string   `json:"pagination_last_uuid"`
 }
 
@@ -73,6 +73,43 @@ type loadParams struct {
 type cookie struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+}
+
+type Error struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type PriceChangeResponse struct {
+	Result []struct {
+		ProductID int     `json:"product_id"`
+		OfferID   string  `json:"offer_id"`
+		Updated   bool    `json:"updated"`
+		Errors    []Error `json:"errors"`
+	} `json:"result"`
+}
+
+type Price struct {
+	Price                float64 `json:"price"`
+	OldPrice             float64 `json:"old_price"`
+	MinPrice             float64 `json:"min_price"`
+	MarketingPrice       float64 `json:"marketing_price"`
+	MarketingSellerPrice float64 `json:"marketing_seller_price"`
+	RetailPrice          float64 `json:"retail_price"`
+	VAT                  float64 `json:"vat"`
+	CurrencyCode         string  `json:"currency_code"`
+	AutoActionEnabled    bool    `json:"auto_action_enabled"`
+}
+type Item struct {
+	ProductID int    `json:"product_id"`
+	OfferID   string `json:"offer_id"`
+	Price     Price  `json:"price"`
+}
+
+type PriceResponse struct {
+	Cursor string `json:"cursor"`
+	Items  []Item `json:"items"`
+	Total  int32  `json:"total"`
 }
 
 type Api struct {
@@ -155,7 +192,12 @@ func (api *Api) GetReviewsTillTime(startTime time.Time) ([]*Review, time.Time) {
 	var nextStart *time.Time = nil
 	brk := true
 	for next && brk {
-		res := api.GetNextChunk()
+		res, err := api.GetNextChunk()
+		if err != nil {
+			log.Printf("ошибка при получении страницы товаров %v. отзывы начиная с %v до последней успешно полученной страницы не будут обработаны",
+				err, startTime)
+			break
+		}
 		for _, rev := range res.Result {
 			t, _ := time.Parse(time.RFC3339Nano, rev.PublishedAt)
 			if nextStart == nil && t.After(startTime) {
@@ -177,50 +219,96 @@ func (api *Api) GetReviewsTillTime(startTime time.Time) ([]*Review, time.Time) {
 	return reviews, *nextStart
 }
 
-func (api *Api) GetNextChunk() ReviewsList {
+func (api *Api) GetNextChunk() (ReviewsList, error) {
 	loadMoreParams, err := json.Marshal(api.loadMoreParams)
 	if err != nil {
-		log.Fatalf("не удалось подготовить параметры для загрузки товаров %v", err)
+		return ReviewsList{}, fmt.Errorf("не удалось подготовить параметры для загрузки товаров %v", err)
 	}
 	req, err := http.NewRequest("POST", "https://seller.ozon.ru/api/v3/review/list", bytes.NewBuffer(loadMoreParams))
 	if err != nil {
-		log.Fatalf("Ошибка при подготовке запроса %v", err)
+		return ReviewsList{}, fmt.Errorf("ошибка при подготовке запроса %v", err)
 	}
 	for k, v := range api.headers {
 		req.Header.Set(k, v)
 	}
 	resp, err := api.session.Do(req)
 	if err != nil {
-		log.Fatalf("Ошибка при получении списка товаров: %v", err)
+		return ReviewsList{}, fmt.Errorf("ошибка при получении списка товаров: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode > 299 {
-		bodyBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Fatal(err)
-		}
+		bodyBytes, _ := io.ReadAll(resp.Body)
 		bodyString := string(bodyBytes)
-		log.Printf("Запрос завершился со статусом: %d %s", resp.StatusCode, bodyString)
+		return ReviewsList{}, fmt.Errorf("запрос завершился со кодом %d: %s", resp.StatusCode, bodyString)
 	}
 	var res ReviewsList
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		log.Printf("Ошибка декодирования %v", err)
+		return ReviewsList{}, fmt.Errorf("ошибка декодирования %v", err)
 	}
 	api.loadMoreParams.PaginationLastUuid = &res.PaginationLastUUID
 	api.loadMoreParams.PaginationLastTimestamp = &res.PaginationLastTimestamp
-	return res
+	log.Printf("успешно получена страница с параметрами %v %v", res.PaginationLastUUID, res.PaginationLastTimestamp)
+	return res, nil
 }
 
-func (api *Api) ChangePrice(offerIDs []string, newPrices []string) error {
-	// 1. Валидация входных данных
-	if len(offerIDs) == 0 || len(newPrices) == 0 {
-		return fmt.Errorf("списки offerIDs и newPrices не могут быть пустыми")
+func (api *Api) GetPrice(offerIDs []string) (PriceResponse, error) {
+	if len(offerIDs) == 0 || len(offerIDs) > 1000 {
+		return PriceResponse{}, fmt.Errorf("список offerIDs пуст или содержит больше 1000 элементов")
+	}
+	type Filter struct {
+		OfferID    []string `json:"offer_id"`
+		ProductID  []string `json:"product_id"`
+		Visibility string   `json:"visibility"`
+	}
+	type Request struct {
+		Cursor *string `json:"cursor"`
+		Filter Filter  `json:"filter"`
+		Limit  int     `json:"limit"`
 	}
 
-	if len(offerIDs) != len(newPrices) {
-		return fmt.Errorf("количество offerIDs (%d) не совпадает с количеством newPrices (%d)",
-			len(offerIDs), len(newPrices))
+	jsonData, err := json.Marshal(Request{
+		Cursor: nil,
+		Filter: Filter{
+			OfferID:    offerIDs,
+			ProductID:  nil,
+			Visibility: "ALL",
+		},
+		Limit: 1000,
+	})
+	if err != nil {
+		return PriceResponse{}, fmt.Errorf("ошибка сериализации данных: %v", err)
+	}
+	req, err := api.RequestWithAuthHeaders(
+		"POST",
+		"https://api-seller.ozon.ru/v5/product/info/prices",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return PriceResponse{}, fmt.Errorf("ошибка создания запроса: %v", err)
+	}
+	resp, err := api.session.Do(req)
+	if err != nil {
+		return PriceResponse{}, fmt.Errorf("ошибка отправки запроса: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return PriceResponse{}, fmt.Errorf("API error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var response PriceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return PriceResponse{}, fmt.Errorf("ошибка декодирования ответа: %v", err)
+	}
+	return response, nil
+}
+
+func (api *Api) ChangePrice(newPrices map[string]string) error {
+	// 1. Валидация входных данных
+	if len(newPrices) == 0 || len(newPrices) > 1000 {
+		return fmt.Errorf("списки offerIDs и newPrices не могут быть пустыми")
 	}
 
 	// 2. Подготовка структуры запроса
@@ -234,16 +322,10 @@ func (api *Api) ChangePrice(offerIDs []string, newPrices []string) error {
 	}
 
 	var priceItems []PriceItem
-	for i := range offerIDs {
-		// Проверка формата цены
-		if !strings.Contains(newPrices[i], ".") {
-			return fmt.Errorf("неверный формат цены для offer_id %s: %s. Пример: 999.99",
-				offerIDs[i], newPrices[i])
-		}
-
+	for k, v := range newPrices {
 		priceItems = append(priceItems, PriceItem{
-			OfferID: offerIDs[i],
-			Price:   newPrices[i],
+			OfferID: k,
+			Price:   v,
 		})
 	}
 
@@ -254,7 +336,7 @@ func (api *Api) ChangePrice(offerIDs []string, newPrices []string) error {
 	}
 
 	// 4. Создание и настройка запроса
-	req, err := http.NewRequest(
+	req, err := api.RequestWithAuthHeaders(
 		"POST",
 		"https://api-seller.ozon.ru/v1/product/import/prices",
 		bytes.NewBuffer(jsonData),
@@ -263,30 +345,43 @@ func (api *Api) ChangePrice(offerIDs []string, newPrices []string) error {
 		return fmt.Errorf("ошибка создания запроса: %v", err)
 	}
 
-	// 5. Установка заголовков
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Client-Id", api.arguments[params.CLIENT_ID])
-	req.Header.Set("Api-Key", api.arguments[params.API_KEY])
-
-	// 6. Отправка запроса
+	// 5. Отправка запроса
 	resp, err := api.session.Do(req)
 	if err != nil {
 		return fmt.Errorf("ошибка отправки запроса: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// 7. Обработка ответа
+	// 6. Обработка ответа
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("API error: %d %s", resp.StatusCode, string(body))
 	}
 
-	// 8. Декодирование ответа
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	var response *PriceChangeResponse
+	if err := json.NewDecoder(resp.Body).Decode(response); err != nil {
 		return fmt.Errorf("ошибка декодирования ответа: %v", err)
 	}
+	successfullyUpdated := 0
+	for _, res := range response.Result {
+		if !res.Updated {
+			log.Printf("ошибка при обновлнеии цены %", res)
+		} else {
+			successfullyUpdated++
+		}
+	}
 
-	log.Printf("Успешно обновлено %d цен", len(offerIDs))
+	log.Printf("Успешно обновлено %d цен", successfullyUpdated)
 	return nil
+}
+
+func (api *Api) RequestWithAuthHeaders(method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Client-Id", api.arguments[params.CLIENT_ID])
+	req.Header.Set("Api-Key", api.arguments[params.API_KEY])
+	return req, nil
 }

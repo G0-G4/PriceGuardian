@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -26,18 +25,20 @@ import (
 // 746 токенов на 10 товаров 894 891 в месяц ~ 11_995
 
 type ChatClient struct {
-	client pb.ChatServiceClient
-	ctx    context.Context
+	client    pb.ChatServiceClient
+	ctx       context.Context
+	args      params.Params
+	expiresAt time.Time
 }
 
-func (c *ChatClient) Close() {
-	if closer, ok := c.client.(io.Closer); ok {
+func (chat *ChatClient) Close() {
+	if closer, ok := chat.client.(io.Closer); ok {
 		closer.Close()
 	}
 }
 
 // NewChatClient создает новый экземпляр ChatClient
-func NewChatClient(token string) *ChatClient {
+func NewChatClient(args params.Params) *ChatClient {
 	// Устанавливаем соединение с gRPC сервером
 	creds := credentials.NewClientTLSFromCert(nil, "")
 	conn, err := grpc.NewClient("gigachat.devices.sberbank.ru", grpc.WithTransportCredentials(creds))
@@ -46,53 +47,40 @@ func NewChatClient(token string) *ChatClient {
 	}
 	// Создаем контекст с тайм-аутом
 	ctx := context.Background()
-	// Добавляем токен аутентификации в метаданные
-	md := metadata.Pairs("Authorization", "Bearer "+token)
-	ctx = metadata.NewOutgoingContext(ctx, md)
 	return &ChatClient{
-		client: pb.NewChatServiceClient(conn),
-		ctx:    ctx,
+		client:    pb.NewChatServiceClient(conn),
+		ctx:       ctx,
+		args:      args,
+		expiresAt: time.Now().Add(-time.Hour),
 	}
 }
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	args := params.LoadParams()
-	// Устанавливаем соединение с gRPC сервером
-	chat := NewChatClient(getAccessToken(args))
+	//Устанавливаем соединение с gRPC сервером
+	chat := NewChatClient(args)
 	api := ozon.NewApi(args)
-	next := true
-	maxDiff, err := time.ParseDuration(args[params.TIME_DEPTH])
-	if err != nil {
-		log.Fatal(err)
-	}
-	start := time.Now()
-	end := start
-	for next && start.Sub(end) <= maxDiff {
-		res := api.GetNextChunk()
-		for i, rev := range res.Result {
-			fullReview := strings.Join([]string{rev.Text.Negative, rev.Text.Positive, rev.Text.Comment}, " ")
-			negative := isNegativeResponse(chat, fullReview, args)
-			log.Printf("%d\nотзыв: %v\nнегативный: %t\n", i+1, rev, negative)
-			if negative {
-				log.Println("process...")
-			}
+	reviews := loadNewReviews(api)
+	idsToQuarantine := make(map[string]bool, len(reviews)) // no sets in go
+	for _, review := range reviews {
+		fullReview := strings.Join([]string{review.Text.Negative, review.Text.Positive, review.Text.Comment}, " ")
+		isNegative, err := chat.isNegativeResponse(fullReview)
+		if err != nil {
+			log.Printf("ошибка при обработке отзыва %v %v", review, err)
 		}
-		next = res.HasNext
-		tt, _ := strconv.ParseInt(res.PaginationLastTimestamp, 10, 64)
-		end = time.UnixMicro(tt)
-	}
-	rev := loadNewReviews(api)
-	for _, r := range rev {
-		log.Println(r)
-	}
-	log.Println("-----------------------------")
-	rev = loadNewReviews(api)
-	for _, r := range rev {
-		log.Println(r)
+		if isNegative {
+			log.Printf("%v добавлен в список для обновления цен", review)
+			idsToQuarantine[review.Product.OfferID] = true
+		}
 	}
 }
 
+func placeToQuarantine(api *ozon.Api) {
+
+}
+
+// TODO better write after all processing is done. save last processed time at the and of main. or take the time of last successful price change
 func loadNewReviews(api *ozon.Api) []*ozon.Review {
 	start, err := os.ReadFile("start.txt")
 	if err != nil {
@@ -106,13 +94,14 @@ func loadNewReviews(api *ozon.Api) []*ozon.Review {
 	return reviews
 }
 
-func isNegativeResponse(chat *ChatClient, userResponse string, args params.Params) bool {
+func (chat *ChatClient) isNegativeResponse(userResponse string) (bool, error) {
+	chat.updateAccessTokenIfNecessary()
 	request := &pb.ChatRequest{
 		Model: "GigaChat",
 		Messages: []*pb.Message{
 			{
 				Role:    "system",
-				Content: args[params.PROMPT],
+				Content: chat.args[params.PROMPT],
 			},
 			{
 				Role:    "user",
@@ -122,15 +111,13 @@ func isNegativeResponse(chat *ChatClient, userResponse string, args params.Param
 	}
 	response, err := chat.client.Chat(chat.ctx, request)
 	if err != nil {
-		log.Printf("Ошибка при вызове метода Chat: %v", err)
-		return false
+		return false, fmt.Errorf("Ошибка при вызове метода Chat: %v", err)
 	}
 	if len(response.Alternatives) < 1 {
-		log.Printf("не получен ответ от модели")
-		return false
+		return false, fmt.Errorf("не получен ответ от модели")
 	}
 	class := response.Alternatives[0].Message.Content
-	return class == "отрицательный"
+	return class == "отрицательный", nil
 }
 
 type AuthResponse struct {
@@ -138,7 +125,11 @@ type AuthResponse struct {
 	ExpiresAt   int64  `json:"expires_at"`   // Время истечения токена в миллисекундах
 }
 
-func getAccessToken(args params.Params) string {
+func (chat *ChatClient) updateAccessTokenIfNecessary() {
+	if time.Now().Before(chat.expiresAt.Add(-time.Minute)) {
+		return
+	}
+	log.Println("обновляю access токен")
 	// URL для запроса
 	apiURL := "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 	// Создаем данные для запроса
@@ -154,7 +145,7 @@ func getAccessToken(args params.Params) string {
 	req.Header.Set("Accept", "application/json")
 	id, _ := uuid.NewV4()
 	req.Header.Set("RqUID", id.String())
-	req.Header.Set("Authorization", fmt.Sprintf("Basic %s", args[params.GIGACHAT_AUTH_DATA]))
+	req.Header.Set("Authorization", fmt.Sprintf("Basic %s", chat.args[params.GIGACHAT_AUTH_DATA]))
 	// Отправляем запрос
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -173,5 +164,7 @@ func getAccessToken(args params.Params) string {
 	if err := json.NewDecoder(resp.Body).Decode(&authResponse); err != nil {
 		log.Fatalf("Ошибка декодирования %v", err)
 	}
-	return authResponse.AccessToken // TODO add logic to refresh token
+	chat.expiresAt = time.UnixMilli(authResponse.ExpiresAt)
+	md := metadata.Pairs("Authorization", "Bearer "+authResponse.AccessToken)
+	chat.ctx = metadata.NewOutgoingContext(chat.ctx, md)
 }
