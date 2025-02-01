@@ -74,10 +74,17 @@ func main() {
 			idsToQuarantine[review.Product.OfferID] = true
 		}
 	}
-}
-
-func placeToQuarantine(api *ozon.Api) {
-
+	offerIds := make([]string, len(idsToQuarantine))
+	for id := range idsToQuarantine {
+		offerIds = append(offerIds, id)
+	}
+	chunkSize := 1000
+	for i := 0; i < len(offerIds); i += chunkSize {
+		end := min(i+chunkSize, len(offerIds))
+		if api.PlaceToQuarantine(offerIds[i:end]) != nil {
+			log.Printf("ошибка при обновлении цен %v", offerIds[i:end])
+		}
+	}
 }
 
 // TODO better write after all processing is done. save last processed time at the and of main. or take the time of last successful price change

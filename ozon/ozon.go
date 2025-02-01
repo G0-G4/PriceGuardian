@@ -252,6 +252,45 @@ func (api *Api) GetNextChunk() (ReviewsList, error) {
 	return res, nil
 }
 
+func (api *Api) PlaceToQuarantine(offerIds []string) error {
+	if len(offerIds) == 0 || len(offerIds) > 1000 {
+		return fmt.Errorf("список offerIDs пуст или содержит больше 1000 элементов")
+	}
+	priceChangeCoefficient := 100.00 // TODO parametrize
+	prices, err := api.GetPrice(offerIds)
+	if err != nil {
+		return fmt.Errorf("ошибка при получении цен %v", err)
+	}
+	pricesMap := make(map[string]float64, len(offerIds))
+	for _, price := range prices.Items {
+		pricesMap[price.OfferID] = price.Price.Price * priceChangeCoefficient
+	}
+	res, err := api.ChangePrice(pricesMap)
+	if err != nil {
+		return fmt.Errorf("ошибка при повышении цен %v", err)
+	}
+	for _, item := range res.Result {
+		if len(item.Errors) != 0 {
+			fmt.Printf("ошибка при повышении цены %v", item)
+		} else {
+			pricesMap[item.OfferID] /= priceChangeCoefficient
+		}
+	}
+
+	res, err = api.ChangePrice(pricesMap)
+	if err != nil {
+		return fmt.Errorf("ошибка при понижении цен %v", err)
+	}
+	for _, item := range res.Result {
+		if len(item.Errors) != 0 {
+			fmt.Printf("ошибка при понижении цены %v", item)
+		} else {
+			pricesMap[item.OfferID] /= priceChangeCoefficient
+		}
+	}
+	return nil
+}
+
 func (api *Api) GetPrice(offerIDs []string) (PriceResponse, error) {
 	if len(offerIDs) == 0 || len(offerIDs) > 1000 {
 		return PriceResponse{}, fmt.Errorf("список offerIDs пуст или содержит больше 1000 элементов")
@@ -305,10 +344,10 @@ func (api *Api) GetPrice(offerIDs []string) (PriceResponse, error) {
 	return response, nil
 }
 
-func (api *Api) ChangePrice(newPrices map[string]string) error {
+func (api *Api) ChangePrice(newPrices map[string]float64) (PriceChangeResponse, error) {
 	// 1. Валидация входных данных
 	if len(newPrices) == 0 || len(newPrices) > 1000 {
-		return fmt.Errorf("списки offerIDs и newPrices не могут быть пустыми")
+		return PriceChangeResponse{}, fmt.Errorf("списки offerIDs и newPrices не могут быть пустыми")
 	}
 
 	// 2. Подготовка структуры запроса
@@ -325,14 +364,14 @@ func (api *Api) ChangePrice(newPrices map[string]string) error {
 	for k, v := range newPrices {
 		priceItems = append(priceItems, PriceItem{
 			OfferID: k,
-			Price:   v,
+			Price:   fmt.Sprintf("%.2f", v),
 		})
 	}
 
 	// 3. Формирование JSON
 	jsonData, err := json.Marshal(PriceUpdateRequest{Prices: priceItems})
 	if err != nil {
-		return fmt.Errorf("ошибка сериализации данных: %v", err)
+		return PriceChangeResponse{}, fmt.Errorf("ошибка сериализации данных: %v", err)
 	}
 
 	// 4. Создание и настройка запроса
@@ -342,37 +381,37 @@ func (api *Api) ChangePrice(newPrices map[string]string) error {
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
-		return fmt.Errorf("ошибка создания запроса: %v", err)
+		return PriceChangeResponse{}, fmt.Errorf("ошибка создания запроса: %v", err)
 	}
 
 	// 5. Отправка запроса
 	resp, err := api.session.Do(req)
 	if err != nil {
-		return fmt.Errorf("ошибка отправки запроса: %v", err)
+		return PriceChangeResponse{}, fmt.Errorf("ошибка отправки запроса: %v", err)
 	}
 	defer resp.Body.Close()
 
 	// 6. Обработка ответа
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error: %d %s", resp.StatusCode, string(body))
+		return PriceChangeResponse{}, fmt.Errorf("API error: %d %s", resp.StatusCode, string(body))
 	}
 
-	var response *PriceChangeResponse
-	if err := json.NewDecoder(resp.Body).Decode(response); err != nil {
-		return fmt.Errorf("ошибка декодирования ответа: %v", err)
+	var response PriceChangeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return PriceChangeResponse{}, fmt.Errorf("ошибка декодирования ответа: %v", err)
 	}
 	successfullyUpdated := 0
 	for _, res := range response.Result {
 		if !res.Updated {
-			log.Printf("ошибка при обновлнеии цены %", res)
+			log.Printf("ошибка при обновлнеии цены %v", res)
 		} else {
 			successfullyUpdated++
 		}
 	}
 
 	log.Printf("Успешно обновлено %d цен", successfullyUpdated)
-	return nil
+	return response, nil
 }
 
 func (api *Api) RequestWithAuthHeaders(method, path string, body io.Reader) (*http.Request, error) {
