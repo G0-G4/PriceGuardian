@@ -72,6 +72,8 @@ func main() {
 		if isNegative {
 			log.Printf("%v добавлен в список для обновления цен", review)
 			idsToQuarantine[review.Product.OfferID] = true
+		} else {
+			log.Printf("%v является положительным отзывом", review)
 		}
 	}
 	offerIds := make([]string, len(idsToQuarantine))
