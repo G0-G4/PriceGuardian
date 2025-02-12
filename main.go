@@ -76,15 +76,15 @@ func main() {
 			log.Printf("%v является положительным отзывом", review)
 		}
 	}
-	offerIds := make([]string, len(idsToQuarantine))
+	offerIds := make([]string, 0, len(idsToQuarantine))
 	for id := range idsToQuarantine {
 		offerIds = append(offerIds, id)
 	}
 	chunkSize := 1000
 	for i := 0; i < len(offerIds); i += chunkSize {
 		end := min(i+chunkSize, len(offerIds))
-		if api.PlaceToQuarantine(offerIds[i:end]) != nil {
-			log.Printf("ошибка при обновлении цен %v", offerIds[i:end])
+		if err := api.PlaceToQuarantine(offerIds[i:end]); err != nil {
+			log.Printf("ошибка при обновлении цен %v", err)
 		}
 	}
 }
@@ -127,7 +127,7 @@ func (chat *ChatClient) isNegativeResponse(userResponse string) (bool, error) {
 	}
 	class := response.Alternatives[0].Message.Content
 	log.Printf("prompt:%s\nотзыв '%s' ответы: %v", chat.args[params.GIGACHAT_PROMPT], userResponse, response.Alternatives)
-	return class == "отрицательный", nil
+	return strings.ToLower(class) == "отрицательный", nil
 }
 
 type AuthResponse struct {

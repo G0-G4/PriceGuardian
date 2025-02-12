@@ -154,6 +154,7 @@ func NewApi(args params.Params) *Api {
 			"x-o3-company-id": args[params.COMPANY_ID],
 			"x-o3-language":   "ru",
 			"x-o3-page-type":  "review",
+			"accept-encoding": "*",
 		},
 		arguments: args,
 	}
@@ -419,6 +420,7 @@ func (api *Api) RequestWithAuthHeaders(method, path string, body io.Reader) (*ht
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Accept-Encoding", "*")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Client-Id", api.arguments[params.CLIENT_ID])
 	req.Header.Set("Api-Key", api.arguments[params.API_KEY])
