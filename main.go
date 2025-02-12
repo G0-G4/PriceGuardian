@@ -126,6 +126,7 @@ func (chat *ChatClient) isNegativeResponse(userResponse string) (bool, error) {
 		return false, fmt.Errorf("не получен ответ от модели")
 	}
 	class := response.Alternatives[0].Message.Content
+	log.Printf("prompt:%s\nотзыв '%s' ответы: %v", chat.args[params.PROMPT], userResponse, response.Alternatives)
 	return class == "отрицательный", nil
 }
 
