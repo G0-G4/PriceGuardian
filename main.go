@@ -110,7 +110,7 @@ func (chat *ChatClient) isNegativeResponse(userResponse string) (bool, error) {
 		Messages: []*pb.Message{
 			{
 				Role:    "system",
-				Content: chat.args[params.PROMPT],
+				Content: chat.args[params.GIGACHAT_PROMPT],
 			},
 			{
 				Role:    "user",
@@ -126,7 +126,7 @@ func (chat *ChatClient) isNegativeResponse(userResponse string) (bool, error) {
 		return false, fmt.Errorf("не получен ответ от модели")
 	}
 	class := response.Alternatives[0].Message.Content
-	log.Printf("prompt:%s\nотзыв '%s' ответы: %v", chat.args[params.PROMPT], userResponse, response.Alternatives)
+	log.Printf("prompt:%s\nотзыв '%s' ответы: %v", chat.args[params.GIGACHAT_PROMPT], userResponse, response.Alternatives)
 	return class == "отрицательный", nil
 }
 
