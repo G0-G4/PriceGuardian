@@ -353,8 +353,9 @@ func (api *Api) ChangePrice(newPrices map[string]float64) (PriceChangeResponse, 
 
 	// 2. Подготовка структуры запроса
 	type PriceItem struct {
-		OfferID string `json:"offer_id"`
-		Price   string `json:"price"`
+		OfferID  string `json:"offer_id"`
+		Price    string `json:"price"`
+		OldPrice string `json:"old_price"`
 	}
 
 	type PriceUpdateRequest struct {
@@ -364,8 +365,9 @@ func (api *Api) ChangePrice(newPrices map[string]float64) (PriceChangeResponse, 
 	var priceItems []PriceItem
 	for k, v := range newPrices {
 		priceItems = append(priceItems, PriceItem{
-			OfferID: k,
-			Price:   fmt.Sprintf("%.2f", v),
+			OfferID:  k,
+			Price:    fmt.Sprintf("%.2f", v),
+			OldPrice: "0",
 		})
 	}
 
